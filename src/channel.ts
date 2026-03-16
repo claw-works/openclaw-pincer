@@ -78,10 +78,12 @@ async function sendToPincerDm(
   });
 }
 
-/** Check if a room message mentions this agent (by agentId or agentName). */
+/** Check if a room message mentions this agent (by agentId, agentName, or @all/@everyone). */
 function isMentioned(text: string, config: PincerConfig): boolean {
   if (text.includes(config.agentId)) return true;
   if (config.agentName && text.includes(config.agentName)) return true;
+  // @all / @everyone / @here broadcast mentions
+  if (/@(all|everyone|here)\b/i.test(text)) return true;
   return false;
 }
 

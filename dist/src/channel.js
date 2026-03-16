@@ -37,11 +37,14 @@ async function sendToPincerDm(config, peerId, text) {
         }),
     });
 }
-/** Check if a room message mentions this agent (by agentId or agentName). */
+/** Check if a room message mentions this agent (by agentId, agentName, or @all/@everyone). */
 function isMentioned(text, config) {
     if (text.includes(config.agentId))
         return true;
     if (config.agentName && text.includes(config.agentName))
+        return true;
+    // @all / @everyone / @here broadcast mentions
+    if (/@(all|everyone|here)\b/i.test(text))
         return true;
     return false;
 }

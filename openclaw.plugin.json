@@ -2,7 +2,7 @@
   "id": "pincer",
   "name": "Pincer",
   "description": "Pincer channel plugin for OpenClaw — connects agents to Pincer rooms and DMs",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "channels": ["pincer"],
   "configSchema": {
     "type": "object",
