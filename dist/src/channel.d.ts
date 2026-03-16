@@ -7,8 +7,11 @@ export interface PincerConfig {
     baseUrl: string;
     apiKey: string;
     agentId: string;
+    agentName?: string;
     rooms?: string[];
     pollMs?: number;
+    requireMention?: boolean;
+    historyLimit?: number;
 }
 export declare const pincerChannel: {
     id: string;
@@ -26,6 +29,12 @@ export declare const pincerChannel: {
         media: boolean;
         reactions: boolean;
         threads: boolean;
+    };
+    agentPrompt: {
+        messageToolHints: () => string[];
+    };
+    groups: {
+        resolveRequireMention: (params: any) => boolean;
     };
     config: {
         listAccountIds: (cfg: any) => string[];

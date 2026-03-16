@@ -28,13 +28,41 @@ async function sendToPincerRoom(config, roomId, agentId, text) {
     });
 }
 async function sendToPincerDm(config, peerId, text) {
-    await pincerFetch(config.baseUrl, config.apiKey, `/agents/${config.agentId}/messages`, {
+    await pincerFetch(config.baseUrl, config.apiKey, "/messages/send", {
         method: "POST",
-        body: JSON.stringify({ to_agent_id: peerId, payload: { text } }),
+        body: JSON.stringify({
+            from_agent_id: config.agentId,
+            to_agent_id: peerId,
+            payload: { text },
+        }),
     });
+}
+/** Check if a room message mentions this agent (by agentId or agentName). */
+function isMentioned(text, config) {
+    if (text.includes(config.agentId))
+        return true;
+    if (config.agentName && text.includes(config.agentName))
+        return true;
+    return false;
+}
+/** Fetch recent room messages to use as conversation history. */
+async function fetchRoomHistory(config, roomId, limit) {
+    try {
+        const msgs = await pincerFetch(config.baseUrl, config.apiKey, `/rooms/${roomId}/messages?limit=${limit}`);
+        return msgs.map((m) => ({
+            sender: m.sender_agent_id ?? "unknown",
+            body: m.content ?? "",
+            timestamp: m.created_at ? new Date(m.created_at).getTime() : undefined,
+        }));
+    }
+    catch {
+        return [];
+    }
 }
 function startRoomPoller(params) {
     const { config, roomId, ctx, signal, pollMs } = params;
+    const requireMention = config.requireMention !== false; // default true
+    const historyLimit = config.historyLimit ?? 10;
     let lastId = null;
     const poll = async () => {
         if (signal.aborted)
@@ -50,6 +78,7 @@ function startRoomPoller(params) {
             }
             const channelRuntime = ctx.channelRuntime;
             for (const msg of msgs) {
+                // Skip own messages
                 if (msg.sender_agent_id === config.agentId) {
                     lastId = msg.id;
                     continue;
@@ -60,7 +89,14 @@ function startRoomPoller(params) {
                     continue;
                 }
                 const messageText = msg.content ?? "";
+                // Require mention in group rooms (default: on)
+                if (requireMention && !isMentioned(messageText, config)) {
+                    lastId = msg.id;
+                    continue;
+                }
                 const senderId = msg.sender_agent_id ?? "unknown";
+                // Fetch recent history for context
+                const history = await fetchRoomHistory(config, roomId, historyLimit);
                 const route = channelRuntime.routing.resolveAgentRoute({
                     cfg: ctx.cfg,
                     channel: "pincer",
@@ -75,12 +111,22 @@ function startRoomPoller(params) {
                         SessionKey: route.sessionKey,
                         Channel: "pincer",
                         AccountId: ctx.accountId,
+                        InboundHistory: history,
                     },
                     cfg: ctx.cfg,
                     dispatcherOptions: {
                         deliver: async (payload) => {
                             await sendToPincerRoom(config, roomId, config.agentId, payload.text);
                         },
+                    },
+                    replyOptions: {
+                        extraSystemPrompt: [
+                            "You are in a Pincer agent room (group chat). Rules:",
+                            "- Only respond when directly mentioned or asked a question.",
+                            "- Keep responses concise and on-topic.",
+                            "- Do NOT engage in idle chit-chat or filler responses.",
+                            "- Do NOT respond to every message — quality over quantity.",
+                        ].join("\n"),
                     },
                 });
                 lastId = msg.id;
@@ -177,6 +223,18 @@ export const pincerChannel = {
         reactions: false,
         threads: false,
     },
+    agentPrompt: {
+        messageToolHints: () => [
+            "- In Pincer rooms, only respond when @mentioned or directly asked. No idle chit-chat.",
+            "- In Pincer DMs, respond normally.",
+        ],
+    },
+    groups: {
+        resolveRequireMention: (params) => {
+            const config = resolveConfig(params.cfg);
+            return config.requireMention !== false; // default true
+        },
+    },
     config: {
         listAccountIds: (cfg) => {
             const config = resolveConfig(cfg);
@@ -196,14 +254,12 @@ export const pincerChannel = {
                 return;
             }
             const signal = ctx.abortSignal;
-            const pollMs = config.pollMs ?? 2000;
+            const pollMs = config.pollMs ?? 15000;
             for (const roomId of config.rooms ?? []) {
                 startRoomPoller({ config, roomId, ctx, signal, pollMs });
             }
             startDmPoller({ config, ctx, signal, pollMs });
-            console.log(`[pincer] Started. Monitoring ${(config.rooms ?? []).length} room(s) + DMs as agent ${config.agentId}`);
-            // Keep startAccount alive until the signal fires — OpenClaw treats immediate
-            // return as a crash and schedules auto-restart.
+            console.log(`[pincer] Started. requireMention=${config.requireMention !== false}. Monitoring ${(config.rooms ?? []).length} room(s) + DMs as agent ${config.agentId}`);
             await new Promise((resolve) => {
                 if (signal.aborted) {
                     resolve();
