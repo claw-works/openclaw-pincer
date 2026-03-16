@@ -278,6 +278,13 @@ export const pincerChannel = {
       console.log(
         `[pincer] Started. Monitoring ${(config.rooms ?? []).length} room(s) + DMs as agent ${config.agentId}`
       );
+
+      // Keep startAccount alive until the signal fires — OpenClaw treats immediate
+      // return as a crash and schedules auto-restart.
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) { resolve(); return; }
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
     },
   },
   outbound: {

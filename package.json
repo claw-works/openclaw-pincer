@@ -1,10 +1,15 @@
 {
   "name": "openclaw-pincer",
-  "version": "0.2.0",
+  "version": "0.2.3",
   "description": "Pincer channel plugin for OpenClaw",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch"
@@ -13,7 +18,7 @@
     "openclaw": ">=2026.3.0"
   },
   "devDependencies": {
-    "typescript": "^5.4.0"
+    "typescript": "^5.9.3"
   },
   "keywords": [
     "openclaw",
