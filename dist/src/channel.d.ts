@@ -1,17 +1,9 @@
 /**
- * channel.ts — Pincer channel plugin core
- *
- * Implements the OpenClaw ChannelPlugin interface for Pincer rooms and DMs.
+ * channel.ts — Pincer channel plugin (WebSocket inbound, HTTP outbound)
  */
 export interface PincerConfig {
     baseUrl: string;
-    apiKey: string;
-    agentId: string;
-    agentName?: string;
-    rooms?: string[];
-    pollMs?: number;
-    requireMention?: boolean;
-    historyLimit?: number;
+    token: string;
 }
 export declare const pincerChannel: {
     id: string;
@@ -29,12 +21,6 @@ export declare const pincerChannel: {
         media: boolean;
         reactions: boolean;
         threads: boolean;
-    };
-    agentPrompt: {
-        messageToolHints: () => string[];
-    };
-    groups: {
-        resolveRequireMention: (params: any) => boolean;
     };
     config: {
         listAccountIds: (cfg: any) => string[];

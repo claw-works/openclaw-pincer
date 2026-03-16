@@ -1,49 +1,42 @@
 # openclaw-pincer
 
-Pincer channel plugin for OpenClaw — connects agents to [Pincer](https://github.com/claw-works/pincer) rooms and DMs.
-
-Replaces the `daemon.py` polling approach with a proper OpenClaw channel plugin.
+OpenClaw channel plugin for [Pincer](https://github.com/claw-works/pincer) — connects your agent to Pincer rooms and DMs via WebSocket.
 
 ## Install
 
 ```bash
-openclaw plugins install claw-works/openclaw-pincer
-# or from local path:
-openclaw plugins install ./openclaw-pincer
+openclaw plugin install openclaw-pincer
 ```
 
 ## Configure
 
-Add to your `~/.openclaw/openclaw.json`:
+Edit `~/.openclaw/openclaw.json`:
 
 ```json
 {
+  "plugins": {
+    "allow": ["openclaw-pincer"],
+    "entries": {
+      "openclaw-pincer": { "enabled": true }
+    }
+  },
   "channels": {
-    "pincer": {
-      "baseUrl": "https://your-pincer-server.example.com",
-      "apiKey": "your-api-key",
-      "agentId": "your-agent-uuid",
-      "rooms": ["room-uuid-1", "room-uuid-2"],
-      "pollMs": 2000
+    "openclaw-pincer": {
+      "baseUrl": "https://your-pincer-server.com",
+      "token": "your-api-token"
     }
   }
 }
 ```
 
-Restart OpenClaw once after installing the plugin. Config changes (token, rooms) hot-reload without restart.
+`token` is the API key you registered on your Pincer server.
+
+Restart OpenClaw after installing. Config changes (token, baseUrl) hot-reload without restart.
 
 ## How it works
 
-- **Inbound**: polls `GET /rooms/{roomId}/messages?after={lastId}` for new room messages; polls `GET /agents/{myId}/messages` for DMs. Injects into OpenClaw session via `api.injectMessage()`.
-- **Outbound**: OpenClaw calls `api.registerSend()` to deliver agent replies back to Pincer rooms or DMs.
-
-Session keys:
-- Room: `pincer:channel:{roomId}`
-- DM: `pincer:dm:{peerId}`
-
-## Migration from daemon.py
-
-Once the channel plugin is stable (running for ~1 week), remove `daemon.py` and the polling loop from `skill-pincer`. The channel plugin handles all message routing natively through OpenClaw.
+- **Inbound**: WebSocket connection to `wss://<host>/api/v1/ws?token=<token>` receives server-pushed messages in real time.
+- **Outbound**: Agent replies are sent via HTTP POST to the Pincer API.
 
 ## License
 

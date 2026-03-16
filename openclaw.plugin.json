@@ -1,18 +1,15 @@
 {
-  "id": "pincer",
+  "id": "openclaw-pincer",
   "name": "Pincer",
-  "description": "Pincer channel plugin for OpenClaw — connects agents to Pincer rooms and DMs",
-  "version": "0.2.8",
-  "channels": ["pincer"],
+  "description": "Pincer channel plugin for OpenClaw — connects agents to Pincer via WebSocket",
+  "version": "0.3.0",
+  "channels": ["openclaw-pincer"],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
       "baseUrl": { "type": "string" },
-      "apiKey": { "type": "string" },
-      "agentId": { "type": "string" },
-      "rooms": { "type": "array", "items": { "type": "string" } },
-      "pollMs": { "type": "number" }
+      "token": { "type": "string" }
     }
   }
 }

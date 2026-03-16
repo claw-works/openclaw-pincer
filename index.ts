@@ -1,9 +1,9 @@
 import { pincerChannel } from "./src/channel.js";
 
 const plugin = {
-  id: "pincer",
+  id: "openclaw-pincer",
   name: "Pincer",
-  description: "Pincer channel plugin — rooms and DMs for OpenClaw agents",
+  description: "Pincer channel plugin — WebSocket connection for OpenClaw agents",
   register(api: any) {
     api.registerChannel(pincerChannel);
   },
