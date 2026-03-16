@@ -1,15 +1,9 @@
-/**
- * runtime.ts — holds the OpenClawPluginApi runtime reference
- * Pattern copied from openclaw built-in extensions (telegram, irc, etc.)
- */
-
 let _runtime: any = null;
 
-export function setPincerRuntime(runtime: any) {
+export function setRuntime(runtime: any) {
   _runtime = runtime;
 }
 
-export function getPincerRuntime(): any {
-  if (!_runtime) throw new Error("Pincer runtime not initialized");
+export function getRuntime(): any {
   return _runtime;
 }

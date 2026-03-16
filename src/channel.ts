@@ -1,20 +1,7 @@
 /**
  * channel.ts — Pincer channel plugin core
  *
- * Inbound:  polls GET /rooms/{roomId}/messages?after={lastId}
- *           polls GET /agents/{myId}/messages?peer_id={peerId} (DM)
- *           → api.injectMessage()
- *
- * Outbound: api.registerSend()
- *           → POST /rooms/{roomId}/messages
- *           → POST /agents/{fromId}/messages (DM)
- *
- * Config (channels.pincer in openclaw.json):
- *   baseUrl   — Pincer server URL (e.g. https://pincer.apig.run)
- *   apiKey    — Pincer API key
- *   agentId   — This agent's Pincer agent ID
- *   rooms     — Array of room IDs to monitor
- *   pollMs    — Poll interval in ms (default: 2000)
+ * Implements the OpenClaw ChannelPlugin interface for Pincer rooms and DMs.
  */
 
 export interface PincerConfig {
@@ -34,6 +21,10 @@ interface PincerMessage {
   content?: string;
   payload?: { text: string };
   created_at: string;
+}
+
+function resolveConfig(cfg: any): PincerConfig {
+  return (cfg?.channels?.pincer ?? {}) as PincerConfig;
 }
 
 async function pincerFetch(
@@ -57,26 +48,37 @@ async function pincerFetch(
   return res.json();
 }
 
-function buildRoomSessionKey(roomId: string): string {
-  return `pincer:channel:${roomId}`;
+async function sendToPincerRoom(
+  config: PincerConfig,
+  roomId: string,
+  agentId: string,
+  text: string
+): Promise<void> {
+  await pincerFetch(config.baseUrl, config.apiKey, `/rooms/${roomId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ sender_agent_id: agentId, content: text }),
+  });
 }
 
-function buildDmSessionKey(peerId: string): string {
-  return `pincer:dm:${peerId}`;
+async function sendToPincerDm(
+  config: PincerConfig,
+  peerId: string,
+  text: string
+): Promise<void> {
+  await pincerFetch(config.baseUrl, config.apiKey, `/agents/${config.agentId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ to_agent_id: peerId, payload: { text } }),
+  });
 }
 
-/**
- * Start polling a room for new messages.
- * Calls api.injectMessage() for each new message from other agents.
- */
 function startRoomPoller(params: {
   config: PincerConfig;
   roomId: string;
-  api: any;
+  ctx: any;
   signal: AbortSignal;
+  pollMs: number;
 }) {
-  const { config, roomId, api, signal } = params;
-  const pollMs = config.pollMs ?? 2000;
+  const { config, roomId, ctx, signal, pollMs } = params;
   let lastId: string | null = null;
 
   const poll = async () => {
@@ -91,25 +93,50 @@ function startRoomPoller(params: {
 
       // On first poll, just record the latest ID to avoid replaying history
       if (lastId === null) {
-        if (msgs.length > 0) {
-          lastId = msgs[msgs.length - 1].id;
-        }
+        if (msgs.length > 0) lastId = msgs[msgs.length - 1].id;
         return;
       }
 
+      const channelRuntime = ctx.channelRuntime;
       for (const msg of msgs) {
-        // Skip own messages
         if (msg.sender_agent_id === config.agentId) {
           lastId = msg.id;
           continue;
         }
-        await api.injectMessage({
-          sessionKey: buildRoomSessionKey(roomId),
+
+        if (!channelRuntime) {
+          console.warn("[pincer] channelRuntime not available, skipping room message dispatch");
+          lastId = msg.id;
+          continue;
+        }
+
+        const messageText = msg.content ?? "";
+        const senderId = msg.sender_agent_id ?? "unknown";
+
+        const route = channelRuntime.routing.resolveAgentRoute({
+          cfg: ctx.cfg,
           channel: "pincer",
-          from: msg.sender_agent_id ?? "unknown",
-          text: msg.content ?? "",
-          meta: { roomId, messageId: msg.id, createdAt: msg.created_at },
+          accountId: ctx.accountId,
+          peer: { kind: "group", id: roomId },
         });
+
+        await channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher({
+          ctx: {
+            Body: messageText,
+            BodyForAgent: messageText,
+            From: senderId,
+            SessionKey: route.sessionKey,
+            Channel: "pincer",
+            AccountId: ctx.accountId,
+          },
+          cfg: ctx.cfg,
+          dispatcherOptions: {
+            deliver: async (payload: any) => {
+              await sendToPincerRoom(config, roomId, config.agentId, payload.text);
+            },
+          },
+        });
+
         lastId = msg.id;
       }
     } catch (err: any) {
@@ -121,30 +148,23 @@ function startRoomPoller(params: {
 
   const interval = setInterval(poll, pollMs);
   signal.addEventListener("abort", () => clearInterval(interval));
-  // Initial poll
   poll();
 }
 
-/**
- * Start polling DMs for a given peer agent.
- * In practice, we poll /agents/{myId}/messages and fan out by peer.
- */
 function startDmPoller(params: {
   config: PincerConfig;
-  api: any;
+  ctx: any;
   signal: AbortSignal;
+  pollMs: number;
 }) {
-  const { config, api, signal } = params;
-  const pollMs = (config.pollMs ?? 2000) * 2; // DM poll at half rate
+  const { config, ctx, signal, pollMs } = params;
   let lastId: string | null = null;
   let initialized = false;
 
   const poll = async () => {
     if (signal.aborted) return;
     try {
-      const query = lastId
-        ? `?after=${lastId}&limit=50`
-        : "?limit=1";
+      const query = lastId ? `?after=${lastId}&limit=50` : "?limit=1";
       const msgs: PincerMessage[] = await pincerFetch(
         config.baseUrl,
         config.apiKey,
@@ -157,19 +177,46 @@ function startDmPoller(params: {
         return;
       }
 
+      const channelRuntime = ctx.channelRuntime;
       for (const msg of msgs) {
         if (msg.from_agent_id === config.agentId) {
           lastId = msg.id;
           continue;
         }
+
+        if (!channelRuntime) {
+          console.warn("[pincer] channelRuntime not available, skipping DM dispatch");
+          lastId = msg.id;
+          continue;
+        }
+
         const peerId = msg.from_agent_id ?? "unknown";
-        await api.injectMessage({
-          sessionKey: buildDmSessionKey(peerId),
+        const messageText = msg.payload?.text ?? "";
+
+        const route = channelRuntime.routing.resolveAgentRoute({
+          cfg: ctx.cfg,
           channel: "pincer",
-          from: peerId,
-          text: msg.payload?.text ?? "",
-          meta: { dm: true, peerId, messageId: msg.id, createdAt: msg.created_at },
+          accountId: ctx.accountId,
+          peer: { kind: "direct", id: peerId },
         });
+
+        await channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher({
+          ctx: {
+            Body: messageText,
+            BodyForAgent: messageText,
+            From: peerId,
+            SessionKey: route.sessionKey,
+            Channel: "pincer",
+            AccountId: ctx.accountId,
+          },
+          cfg: ctx.cfg,
+          dispatcherOptions: {
+            deliver: async (payload: any) => {
+              await sendToPincerDm(config, peerId, payload.text);
+            },
+          },
+        });
+
         lastId = msg.id;
       }
     } catch (err: any) {
@@ -179,89 +226,72 @@ function startDmPoller(params: {
     }
   };
 
-  const interval = setInterval(poll, pollMs);
+  const interval = setInterval(poll, pollMs * 2); // DM poll at half rate
   signal.addEventListener("abort", () => clearInterval(interval));
   poll();
 }
 
-/**
- * Send a message back to Pincer (outbound from OpenClaw → Pincer).
- * Called by OpenClaw when the agent produces a reply.
- */
-async function sendPincerMessage(params: {
-  config: PincerConfig;
-  sessionKey: string;
-  text: string;
-}): Promise<void> {
-  const { config, sessionKey, text } = params;
-
-  if (sessionKey.startsWith("pincer:channel:")) {
-    const roomId = sessionKey.slice("pincer:channel:".length);
-    await pincerFetch(config.baseUrl, config.apiKey, `/rooms/${roomId}/messages`, {
-      method: "POST",
-      body: JSON.stringify({
-        sender_agent_id: config.agentId,
-        content: text,
-      }),
-    });
-    return;
-  }
-
-  if (sessionKey.startsWith("pincer:dm:")) {
-    const peerId = sessionKey.slice("pincer:dm:".length);
-    await pincerFetch(
-      config.baseUrl,
-      config.apiKey,
-      `/agents/${config.agentId}/messages`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          to_agent_id: peerId,
-          payload: { text },
-        }),
-      }
-    );
-    return;
-  }
-
-  console.warn(`[pincer] unknown session key format: ${sessionKey}`);
-}
-
-/**
- * The plugin object registered with OpenClaw.
- */
-export const pincerPlugin = {
+export const pincerChannel = {
   id: "pincer",
+  meta: {
+    id: "pincer",
+    label: "Pincer",
+    selectionLabel: "Pincer (agent hub)",
+    docsPath: "/channels/pincer",
+    docsLabel: "pincer",
+    blurb: "Pincer agent hub — rooms and DMs.",
+    order: 80,
+  },
+  capabilities: {
+    chatTypes: ["direct", "group"],
+    media: false,
+    reactions: false,
+    threads: false,
+  },
+  config: {
+    listAccountIds: (cfg: any) => {
+      const config = resolveConfig(cfg);
+      if (!config.agentId) return [];
+      return [config.agentId];
+    },
+    resolveAccount: (_cfg: any, accountId: string) => {
+      return { accountId };
+    },
+  },
+  gateway: {
+    startAccount: async (ctx: any) => {
+      const config = resolveConfig(ctx.cfg);
+      if (!config.baseUrl || !config.apiKey || !config.agentId) {
+        console.warn("[pincer] Missing required config (baseUrl, apiKey, agentId). Channel not started.");
+        return;
+      }
 
-  async start(api: any) {
-    const config: PincerConfig = api.getConfig?.() ?? {};
+      const signal: AbortSignal = ctx.abortSignal;
+      const pollMs = config.pollMs ?? 2000;
 
-    if (!config.baseUrl || !config.apiKey || !config.agentId) {
-      console.warn(
-        "[pincer] Missing required config (baseUrl, apiKey, agentId). Channel not started."
+      for (const roomId of config.rooms ?? []) {
+        startRoomPoller({ config, roomId, ctx, signal, pollMs });
+      }
+
+      startDmPoller({ config, ctx, signal, pollMs });
+
+      console.log(
+        `[pincer] Started. Monitoring ${(config.rooms ?? []).length} room(s) + DMs as agent ${config.agentId}`
       );
-      return;
-    }
-
-    const abort = new AbortController();
-
-    // Start room pollers
-    for (const roomId of config.rooms ?? []) {
-      startRoomPoller({ config, roomId, api, signal: abort.signal });
-    }
-
-    // Start DM poller
-    startDmPoller({ config, api, signal: abort.signal });
-
-    // Register outbound send handler
-    api.registerSend(async (params: { sessionKey: string; text: string }) => {
-      await sendPincerMessage({ config, sessionKey: params.sessionKey, text: params.text });
-    });
-
-    console.log(
-      `[pincer] Started. Monitoring ${(config.rooms ?? []).length} room(s) + DMs as agent ${config.agentId}`
-    );
-
-    return () => abort.abort();
+    },
+  },
+  outbound: {
+    deliveryMode: "direct",
+    sendText: async (ctx: any) => {
+      const config = resolveConfig(ctx.cfg);
+      const to: string = ctx.to ?? "";
+      if (to.startsWith("room:")) {
+        const roomId = to.slice("room:".length);
+        await sendToPincerRoom(config, roomId, config.agentId, ctx.text);
+      } else {
+        await sendToPincerDm(config, to, ctx.text);
+      }
+      return { ok: true };
+    },
   },
 };
