@@ -1,6 +1,6 @@
 {
   "name": "openclaw-pincer",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Pincer channel plugin for OpenClaw",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
