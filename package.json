@@ -1,0 +1,24 @@
+{
+  "name": "openclaw-pincer",
+  "version": "0.1.0",
+  "description": "Pincer channel plugin for OpenClaw",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.3.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  },
+  "keywords": ["openclaw", "pincer", "channel", "plugin", "agent"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/claw-works/openclaw-pincer.git"
+  }
+}
