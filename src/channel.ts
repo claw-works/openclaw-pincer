@@ -143,7 +143,7 @@ function startDmPoller(params: {
     if (signal.aborted) return;
     try {
       const query = lastId
-        ? `?before=&limit=50&after=${lastId}`
+        ? `?after=${lastId}&limit=50`
         : "?limit=1";
       const msgs: PincerMessage[] = await pincerFetch(
         config.baseUrl,
