@@ -2,7 +2,7 @@
   "id": "openclaw-pincer",
   "name": "Pincer",
   "description": "Pincer channel plugin for OpenClaw — connects agents to Pincer via WebSocket",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "channels": ["openclaw-pincer"],
   "configSchema": {
     "type": "object",
