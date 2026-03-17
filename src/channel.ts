@@ -1,12 +1,16 @@
 /**
  * channel.ts — Pincer channel plugin (WebSocket inbound, HTTP outbound)
+ * Adapted for Pincer protocol: REGISTER → AUTH → receive envelopes
  */
 
 import WebSocket from "ws";
+import { randomUUID } from "crypto";
 
 export interface PincerConfig {
   baseUrl: string;
-  token: string;
+  token: string;       // api_key
+  agentId: string;     // registered agent UUID on Pincer
+  agentName: string;   // display name
 }
 
 function resolveConfig(cfg: any): PincerConfig {
@@ -15,14 +19,25 @@ function resolveConfig(cfg: any): PincerConfig {
 
 function wsUrl(config: PincerConfig): string {
   const base = config.baseUrl.replace(/\/$/, "").replace(/^http/, "ws");
-  return `${base}/api/v1/ws?token=${config.token}`;
+  return `${base}/ws?agent_id=${config.agentId}`;
+}
+
+function makeEnvelope(type: string, from: string, to: string, payload: any): string {
+  return JSON.stringify({
+    id: randomUUID(),
+    type,
+    from,
+    to,
+    ts: new Date().toISOString(),
+    payload,
+  });
 }
 
 async function httpPost(config: PincerConfig, path: string, body: any): Promise<void> {
   const url = `${config.baseUrl.replace(/\/$/, "")}/api/v1${path}`;
   const res = await fetch(url, {
     method: "POST",
-    headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
+    headers: { "X-API-Key": config.token, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`Pincer POST ${path} ${res.status}`);
@@ -35,6 +50,7 @@ function connectWs(params: {
 }) {
   const { config, ctx, signal } = params;
   let retryMs = 1000;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   function connect() {
     if (signal.aborted) return;
@@ -43,7 +59,28 @@ function connectWs(params: {
 
     ws.on("open", () => {
       retryMs = 1000;
-      console.log("[openclaw-pincer] WebSocket connected");
+      console.log("[openclaw-pincer] WebSocket connected, sending REGISTER + AUTH");
+
+      // Pincer handshake: REGISTER then AUTH
+      ws.send(makeEnvelope("REGISTER", config.agentId, "hub", {
+        name: config.agentName,
+        capabilities: [],
+        runtime_version: "openclaw/openclaw-pincer/0.3",
+        messaging_mode: "ws",
+      }));
+      ws.send(makeEnvelope("AUTH", config.agentId, "hub", {
+        api_key: config.token,
+      }));
+
+      // Heartbeat every 30s
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      heartbeatTimer = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(makeEnvelope("HEARTBEAT", config.agentId, "hub", {
+            agent_id: config.agentId,
+          }));
+        }
+      }, 30000);
     });
 
     ws.on("message", (data: WebSocket.Data) => {
@@ -54,6 +91,7 @@ function connectWs(params: {
     });
 
     ws.on("close", () => {
+      if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
       if (signal.aborted) return;
       console.log(`[openclaw-pincer] WS closed, reconnecting in ${retryMs}ms`);
       setTimeout(connect, retryMs);
@@ -65,7 +103,10 @@ function connectWs(params: {
       ws.close();
     });
 
-    signal.addEventListener("abort", () => ws.close(), { once: true });
+    signal.addEventListener("abort", () => {
+      if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+      ws.close();
+    }, { once: true });
   }
 
   connect();
@@ -75,16 +116,106 @@ function handleMessage(config: PincerConfig, ctx: any, msg: any) {
   const runtime = ctx.channelRuntime;
   if (!runtime) return;
 
-  const sessionKey = msg.room_id
-    ? `openclaw-pincer:channel:${msg.room_id}`
-    : `openclaw-pincer:dm:${msg.from_agent_id ?? msg.sender_agent_id ?? "unknown"}`;
+  const msgType = msg.type ?? "";
+  const payload = msg.payload ?? {};
+  const fromId = msg.from ?? "unknown";
 
-  const senderId = msg.from_agent_id ?? msg.sender_agent_id ?? "unknown";
-  const text = msg.content ?? msg.payload?.text ?? "";
-  if (!text) return;
+  // ACK — just log
+  if (msgType === "ACK") {
+    if (payload.status === "ok") {
+      console.log("[openclaw-pincer] ✓ Authenticated with Pincer hub");
+    } else {
+      console.error("[openclaw-pincer] AUTH failed:", payload.error);
+    }
+    return;
+  }
 
-  const peer = msg.room_id
-    ? { kind: "group" as const, id: msg.room_id }
+  // HEARTBEAT_ACK — check for inbox
+  if (msgType === "HEARTBEAT_ACK" || msgType === "heartbeat.ack") {
+    const inbox = payload.inbox ?? [];
+    for (const item of inbox) {
+      const inner = item.payload ?? {};
+      const text = inner.text ?? JSON.stringify(inner);
+      const sender = item.from ?? "unknown";
+      dispatchToAgent(config, ctx, runtime, sender, text, undefined);
+    }
+    return;
+  }
+
+  // Ignore messages from self to prevent echo loops
+  if (fromId === config.agentId) {
+    return;
+  }
+
+  // PING → PONG
+  if (msgType === "PING") {
+    // We don't have ws ref here, but heartbeat keeps connection alive
+    return;
+  }
+
+  // DM message
+  if (msgType === "MESSAGE" || msgType === "agent.message") {
+    const text = payload.text ?? "";
+    if (!text) return;
+    console.log(`[openclaw-pincer] 💬 DM from ${fromId.slice(0, 8)}: ${text.slice(0, 60)}`);
+    dispatchToAgent(config, ctx, runtime, fromId, text, undefined);
+    return;
+  }
+
+  // Inbox delivery (reconnect catch-up)
+  if (msgType === "inbox.delivery") {
+    const items = Array.isArray(payload) ? payload : [payload];
+    for (const item of items) {
+      const inner = item.payload ?? {};
+      const text = inner.text ?? JSON.stringify(inner);
+      const sender = item.from ?? "unknown";
+      console.log(`[openclaw-pincer] 📬 Inbox from ${sender.slice(0, 8)}`);
+      dispatchToAgent(config, ctx, runtime, sender, text, undefined);
+    }
+    return;
+  }
+
+  // Room message
+  if (msgType === "room.message") {
+    const data = msg.data ?? msg.payload ?? {};
+    const sender = data.sender_agent_id ?? "unknown";
+    const content = data.content ?? "";
+    const roomId = data.room_id ?? msg.room_id ?? "";
+    if (sender === config.agentId || !content) return;
+    console.log(`[openclaw-pincer] 💬 Room msg from ${sender.slice(0, 8)}: ${content.slice(0, 60)}`);
+    dispatchToAgent(config, ctx, runtime, sender, content, roomId);
+    return;
+  }
+
+  // TASK_ASSIGN
+  if (msgType === "TASK_ASSIGN" || msgType === "task.assigned") {
+    const taskId = payload.task_id ?? "?";
+    const title = payload.title ?? "";
+    const description = payload.description ?? "";
+    const text = `[Pincer Task]\ntask_id: ${taskId}\ntitle: ${title}\ndescription:\n${description}`;
+    console.log(`[openclaw-pincer] 📋 Task assigned: ${taskId.slice(0, 8)} ${title}`);
+    dispatchToAgent(config, ctx, runtime, fromId, text, undefined);
+    return;
+  }
+
+  // BROADCAST
+  if (msgType === "BROADCAST" || msgType === "broadcast") {
+    const text = payload.text ?? JSON.stringify(payload);
+    console.log(`[openclaw-pincer] 📢 Broadcast: ${text.slice(0, 60)}`);
+    return;
+  }
+}
+
+function dispatchToAgent(
+  config: PincerConfig, ctx: any, runtime: any,
+  senderId: string, text: string, roomId: string | undefined,
+) {
+  const sessionKey = roomId
+    ? `openclaw-pincer:channel:${roomId}`
+    : `openclaw-pincer:dm:${senderId}`;
+
+  const peer = roomId
+    ? { kind: "group" as const, id: roomId }
     : { kind: "direct" as const, id: senderId };
 
   const route = runtime.routing.resolveAgentRoute({
@@ -106,13 +237,24 @@ function handleMessage(config: PincerConfig, ctx: any, msg: any) {
     cfg: ctx.cfg,
     dispatcherOptions: {
       deliver: async (payload: any) => {
-        if (msg.room_id) {
-          await httpPost(config, `/rooms/${msg.room_id}/messages`, { content: payload.text });
-        } else {
-          await httpPost(config, "/messages/send", {
-            to_agent_id: senderId,
-            payload: { text: payload.text },
-          });
+        try {
+          const text = payload.text ?? payload.content ?? JSON.stringify(payload);
+          console.log(`[openclaw-pincer] 📤 Delivering reply to ${senderId.slice(0, 8)}: ${text.slice(0, 60)}`);
+          if (roomId) {
+            await httpPost(config, `/rooms/${roomId}/messages`, {
+              sender_agent_id: config.agentId,
+              content: text,
+            });
+          } else {
+            await httpPost(config, "/messages/send", {
+              from_agent_id: config.agentId,
+              to_agent_id: senderId,
+              payload: { text },
+            });
+          }
+          console.log(`[openclaw-pincer] ✅ Reply sent to ${senderId.slice(0, 8)}`);
+        } catch (err: any) {
+          console.error(`[openclaw-pincer] ❌ Reply failed:`, err.message);
         }
       },
     },
@@ -139,17 +281,18 @@ export const pincerChannel = {
   config: {
     listAccountIds: (cfg: any) => {
       const c = resolveConfig(cfg);
-      return c.baseUrl && c.token ? ["default"] : [];
+      return c.baseUrl && c.token && c.agentId ? ["default"] : [];
     },
     resolveAccount: (_cfg: any, accountId: string) => ({ accountId }),
   },
   gateway: {
     startAccount: async (ctx: any) => {
       const config = resolveConfig(ctx.cfg);
-      if (!config.baseUrl || !config.token) {
-        console.warn("[openclaw-pincer] Missing baseUrl or token. Channel not started.");
+      if (!config.baseUrl || !config.token || !config.agentId) {
+        console.warn("[openclaw-pincer] Missing baseUrl, token, or agentId. Channel not started.");
         return;
       }
+      if (!config.agentName) config.agentName = "openclaw-agent";
 
       const signal: AbortSignal = ctx.abortSignal;
       connectWs({ config, ctx, signal });
@@ -168,9 +311,13 @@ export const pincerChannel = {
       const config = resolveConfig(ctx.cfg);
       const to: string = ctx.to ?? "";
       if (to.startsWith("room:")) {
-        await httpPost(config, `/rooms/${to.slice(5)}/messages`, { content: ctx.text });
+        await httpPost(config, `/rooms/${to.slice(5)}/messages`, {
+          sender_agent_id: config.agentId,
+          content: ctx.text,
+        });
       } else {
         await httpPost(config, "/messages/send", {
+          from_agent_id: config.agentId,
           to_agent_id: to,
           payload: { text: ctx.text },
         });
