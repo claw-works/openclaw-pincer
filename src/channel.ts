@@ -43,6 +43,101 @@ async function httpPost(config: PincerConfig, path: string, body: any): Promise<
   if (!res.ok) throw new Error(`Pincer POST ${path} ${res.status}`);
 }
 
+// Fetch project room_ids from /api/v1/projects
+async function fetchProjectRooms(config: PincerConfig): Promise<string[]> {
+  const url = `${config.baseUrl.replace(/\/$/, "")}/api/v1/projects`;
+  try {
+    const res = await fetch(url, {
+      headers: { "X-API-Key": config.token, "User-Agent": "openclaw-pincer/0.3" },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const projects = Array.isArray(data) ? data : [];
+    return projects.map((p: any) => p.room_id).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+// Subscribe to a single room WebSocket and dispatch messages
+function connectRoomWs(params: {
+  config: PincerConfig;
+  ctx: any;
+  roomId: string;
+  signal: AbortSignal;
+}): void {
+  const { config, ctx, roomId, signal } = params;
+  let retryMs = 2000;
+
+  function connect() {
+    if (signal.aborted) return;
+    const wsBase = config.baseUrl.replace(/\/$/, "").replace(/^http/, "ws");
+    const ws = new WebSocket(`${wsBase}/api/v1/rooms/${roomId}/ws?api_key=${config.token}`);
+
+    ws.on("open", () => {
+      retryMs = 2000;
+      console.log(`[openclaw-pincer] Room WS connected: ${roomId}`);
+    });
+
+    ws.on("message", (data: WebSocket.Data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.type !== "room.message") return;
+        const payload = msg.data ?? msg.payload ?? {};
+        const sender = payload.sender_agent_id ?? "unknown";
+        const content = payload.content ?? "";
+        if (sender === config.agentId || !content) return;
+        // Mention-only: respond only when @agentName or @all
+        const agentName = config.agentName ?? "";
+        const isMentioned = agentName && content.includes(`@${agentName}`);
+        const isBroadcast = content.includes("@all") || content.includes("@所有人");
+        if (!isMentioned && !isBroadcast) return;
+        const runtime = ctx.channelRuntime;
+        if (!runtime) return;
+        dispatchToAgent(config, ctx, runtime, sender, content, roomId);
+      } catch { /* ignore */ }
+    });
+
+    ws.on("close", () => {
+      if (signal.aborted) return;
+      setTimeout(connect, retryMs);
+      retryMs = Math.min(retryMs * 1.5, 30000);
+    });
+
+    ws.on("error", () => ws.close());
+    signal.addEventListener("abort", () => ws.close(), { once: true });
+  }
+
+  connect();
+}
+
+// Subscribe to all project rooms, refresh every PROJECT_REFRESH_INTERVAL ms
+function startProjectRoomSubscriptions(params: {
+  config: PincerConfig;
+  ctx: any;
+  signal: AbortSignal;
+}): void {
+  const { config, ctx, signal } = params;
+  const PROJECT_REFRESH_MS = 60_000;
+  const subscribedRooms = new Set<string>();
+
+  async function refresh() {
+    if (signal.aborted) return;
+    const rooms = await fetchProjectRooms(config);
+    for (const roomId of rooms) {
+      if (!subscribedRooms.has(roomId)) {
+        subscribedRooms.add(roomId);
+        connectRoomWs({ config, ctx, roomId, signal });
+        console.log(`[openclaw-pincer] Subscribed to project room: ${roomId}`);
+      }
+    }
+  }
+
+  refresh();
+  const timer = setInterval(refresh, PROJECT_REFRESH_MS);
+  signal.addEventListener("abort", () => clearInterval(timer), { once: true });
+}
+
 function connectWs(params: {
   config: PincerConfig;
   ctx: any;
@@ -295,7 +390,12 @@ export const pincerChannel = {
       if (!config.agentName) config.agentName = "openclaw-agent";
 
       const signal: AbortSignal = ctx.abortSignal;
+
+      // Connect to agent DM hub
       connectWs({ config, ctx, signal });
+
+      // Subscribe to all project rooms (and refresh every 60s for new projects)
+      startProjectRoomSubscriptions({ config, ctx, signal });
 
       console.log("[openclaw-pincer] Started, connecting via WebSocket");
 
