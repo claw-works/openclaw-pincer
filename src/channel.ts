@@ -277,6 +277,11 @@ function handleMessage(config: PincerConfig, ctx: any, msg: any) {
     const content = data.content ?? "";
     const roomId = data.room_id ?? msg.room_id ?? "";
     if (sender === config.agentId || !content) return;
+    // Mention-only: only respond when @agentName or @all (prevents echo loops)
+    const agentName = config.agentName ?? "";
+    const isMentioned = agentName && content.includes(`@${agentName}`);
+    const isBroadcast = content.includes("@all") || content.includes("@所有人");
+    if (!isMentioned && !isBroadcast) return;
     console.log(`[openclaw-pincer] 💬 Room msg from ${sender.slice(0, 8)}: ${content.slice(0, 60)}`);
     dispatchToAgent(config, ctx, runtime, sender, content, roomId);
     return;
