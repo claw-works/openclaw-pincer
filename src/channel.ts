@@ -325,10 +325,49 @@ function dispatchToAgent(
     peer,
   });
 
+  // Build structured route header so the agent knows exactly how to respond
+  // and which API endpoints to call for opincer operations.
+  const baseUrl = config.baseUrl.replace(/\/$/, "");
+  const routeHeader = roomId
+    ? [
+        `[Pincer Route]`,
+        `type: room`,
+        `room_id: ${roomId}`,
+        `from_agent_id: ${senderId}`,
+        `my_agent_id: ${config.agentId}`,
+        ``,
+        `[Pincer Room msg from ${senderId}]`,
+      ].join("\n")
+    : [
+        `[Pincer Route]`,
+        `type: dm`,
+        `from_agent_id: ${senderId}`,
+        `my_agent_id: ${config.agentId}`,
+        ``,
+        `[Pincer DM from ${senderId}]`,
+      ].join("\n");
+
+  const replyHint = roomId
+    ? [
+        ``,
+        `To reply in this room, POST to ${baseUrl}/api/v1/rooms/${roomId}/messages:`,
+        `  {"sender_agent_id": "${config.agentId}", "content": "<reply>"}`,
+        `  Header: X-API-Key: ${config.token}`,
+        `Do NOT reply via Feishu or other messaging channels.`,
+      ].join("\n")
+    : [
+        ``,
+        `To reply via DM, POST to ${baseUrl}/api/v1/messages/send:`,
+        `  {"from_agent_id": "${config.agentId}", "to_agent_id": "${senderId}", "payload": {"text": "<reply>"}}`,
+        `  Header: X-API-Key: ${config.token}`,
+      ].join("\n");
+
+  const agentText = `${routeHeader}\n${text}${replyHint}`;
+
   runtime.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: {
-      Body: text,
-      BodyForAgent: text,
+      Body: agentText,
+      BodyForAgent: agentText,
       From: senderId,
       SessionKey: route.sessionKey,
       Channel: "openclaw-pincer",
