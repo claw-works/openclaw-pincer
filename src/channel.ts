@@ -347,6 +347,23 @@ function dispatchToAgent(
         `[Pincer DM from ${senderId}]`,
       ].join("\n");
 
+  // Capabilities block injected for room messages — tells agent what actions are available
+  // without requiring it to explore the API first.
+  const capabilitiesHint = roomId
+    ? [
+        ``,
+        `[Opincer Room Actions — use these when asked]`,
+        `1. 创建专项群 / 拉项目群: POST ${baseUrl}/api/v1/projects`,
+        `   Body: {"name":"<项目名>","description":"<可选>","repo":"<可选>","member_agent_ids":[...当前群全部成员]}`,
+        `   先调 GET ${baseUrl}/api/v1/rooms/${roomId}/members (Header: X-API-Key: ${config.token}) 拿成员列表`,
+        `   创建成功后在当前群回复「项目群已建好，<N>位成员已加入 ✅」`,
+        `   注意：只问项目名称即可，其余字段不必询问`,
+        `2. 查当前群成员: GET ${baseUrl}/api/v1/rooms/${roomId}/members`,
+        `   Header: X-API-Key: ${config.token}`,
+        `规则: 写操作(建项目/删除等)必须先得到用户明确指令，不得用于测试或自行探索。`,
+      ].join("\n")
+    : ``;
+
   const replyHint = roomId
     ? [
         ``,
@@ -362,7 +379,7 @@ function dispatchToAgent(
         `  Header: X-API-Key: ${config.token}`,
       ].join("\n");
 
-  const agentText = `${routeHeader}\n${text}${replyHint}`;
+  const agentText = `${routeHeader}\n${text}${capabilitiesHint}${replyHint}`;
 
   runtime.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: {
